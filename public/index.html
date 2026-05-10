@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0f1115" />
+  <title>FocusTube — distraction-free Shorts</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <main class="app">
+    <div class="brand">
+      <span class="brand-icon">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="white"><path d="M8 5v14l11-7z"/></svg>
+      </span>
+      <span>FocusTube</span>
+    </div>
+    <div class="tagline">Search any topic — only watch what you came for</div>
+
+    <div id="notice" class="notice hidden">
+      <span>ⓘ</span>
+      <span>This is a UI preview. Add your YouTube API key to <code>.env</code> to make it fully functional.</span>
+    </div>
+
+    <div class="search-row">
+      <input id="search-input" type="text" placeholder="Search a topic…" autocomplete="off" />
+      <button id="search-btn" type="button">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>
+        </svg>
+        <span>Search</span>
+      </button>
+    </div>
+
+    <div id="chips" class="chips"></div>
+
+    <div class="section-label">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/>
+      </svg>
+      Saved topics
+    </div>
+    <div id="topics" class="topics"></div>
+
+    <div id="player" class="player">
+      <div class="placeholder">
+        <div class="play-circle">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="white"><path d="M8 5v14l11-7z"/></svg>
+        </div>
+        <h3>Click a video below to play it here</h3>
+        <p>No YouTube redirects. No distractions.</p>
+      </div>
+    </div>
+
+    <div id="results-meta" class="results-meta"></div>
+    <div id="grid" class="grid"></div>
+  </main>
+
+  <script src="https://www.youtube.com/iframe_api"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
