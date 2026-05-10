@@ -1,7 +1,6 @@
 (() => {
   const $ = (sel) => document.querySelector(sel);
   const els = {
-    notice: $('#notice'),
     input: $('#search-input'),
     searchBtn: $('#search-btn'),
     chips: $('#chips'),
@@ -159,8 +158,8 @@
       card.addEventListener('click', (e) => {
         if (e.target.closest('[data-bookmark]')) return;
         const id = card.dataset.id;
-        const v = state.rawItems.find((x) => x.id === id);
-        if (v) playVideo(v);
+        const idx = items.findIndex((x) => x.id === id);
+        if (idx >= 0) openShorts(items, idx);
       });
     });
     els.grid.querySelectorAll('[data-bookmark]').forEach((btn) => {
@@ -178,31 +177,153 @@
     });
   }
 
-  function playVideo(v) {
-    els.player.innerHTML = `
-      <div class="frame-wrap">
-        <div id="yt-frame"></div>
-        <div class="now-playing">
-          <div class="t">${escapeHtml(v.title)}</div>
-          <div class="m">${escapeHtml(v.channelTitle || '')} · ${formatViews(v.viewCount)}</div>
+  // --- Shorts overlay (native scroll snapping) ---
+  // Uses the YouTube IFrame API — embedding does NOT consume Data API quota,
+  // so scrolling through cached results never triggers /api/search.
+
+  function openShorts(list, startIndex) {
+    state.shortsList = list;
+    state.shortsIndex = -1; // force trigger on first observe
+    if (!document.getElementById('shorts-overlay')) buildShortsOverlay();
+    
+    const overlay = document.getElementById('shorts-overlay');
+    const listEl = overlay.querySelector('.shorts-list');
+    
+    // Build items
+    listEl.innerHTML = list.map((v, i) => `
+      <div class="shorts-item" data-index="${i}">
+        <div class="shorts-stage" id="stage-${i}">
+          <div class="thumb" style="background-image: url('${escapeHtml(v.thumbnail)}')"></div>
+          <div class="player-container" id="player-container-${i}"></div>
+          <div class="shorts-meta">
+            <div class="t">${escapeHtml(v.title)}</div>
+            <div class="m">${escapeHtml(v.channelTitle || '')} · ${formatViews(v.viewCount)}</div>
+            <div class="i">${i + 1} / ${list.length}</div>
+          </div>
         </div>
-      </div>`;
+      </div>
+    `).join('');
+
+    document.body.classList.add('shorts-open');
+    overlay.classList.add('open');
+
+    // Setup intersection observer for the items
+    if (state.shortsObserver) state.shortsObserver.disconnect();
+    state.shortsObserver = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) {
+          const idx = parseInt(entry.target.dataset.index, 10);
+          activateShort(idx);
+        }
+      });
+    }, {
+      root: listEl,
+      threshold: 0.6
+    });
+
+    listEl.querySelectorAll('.shorts-item').forEach(el => state.shortsObserver.observe(el));
+
+    // Scroll to the start index
+    requestAnimationFrame(() => {
+      const target = listEl.querySelector(`.shorts-item[data-index="${startIndex}"]`);
+      if (target) {
+        target.scrollIntoView({ behavior: 'auto' });
+      }
+    });
+  }
+
+  function closeShorts() {
+    const overlay = document.getElementById('shorts-overlay');
+    if (overlay) overlay.classList.remove('open');
+    document.body.classList.remove('shorts-open');
+    if (state.ytPlayer && typeof state.ytPlayer.stopVideo === 'function') {
+      try { state.ytPlayer.stopVideo(); } catch {}
+    }
+  }
+
+  function goShorts(delta) {
+    const next = state.shortsIndex + delta;
+    if (next < 0 || next >= state.shortsList.length) return;
+    const overlay = document.getElementById('shorts-overlay');
+    const listEl = overlay.querySelector('.shorts-list');
+    const target = listEl.querySelector(`.shorts-item[data-index="${next}"]`);
+    if (target) {
+      target.scrollIntoView({ behavior: 'smooth' });
+    }
+  }
+
+  function buildShortsOverlay() {
+    const overlay = document.createElement('div');
+    overlay.id = 'shorts-overlay';
+    overlay.className = 'shorts-overlay';
+    overlay.innerHTML = `
+      <button class="shorts-close" aria-label="Close">×</button>
+      <button class="shorts-nav up" aria-label="Previous">▲</button>
+      <button class="shorts-nav down" aria-label="Next">▼</button>
+      <div class="shorts-list"></div>
+    `;
+    document.body.appendChild(overlay);
+
+    overlay.querySelector('.shorts-close').addEventListener('click', closeShorts);
+    overlay.querySelector('.shorts-nav.up').addEventListener('click', () => goShorts(-1));
+    overlay.querySelector('.shorts-nav.down').addEventListener('click', () => goShorts(1));
+
+    document.addEventListener('keydown', (e) => {
+      if (!document.body.classList.contains('shorts-open')) return;
+      if (e.key === 'ArrowDown' || e.key === 'j') { e.preventDefault(); goShorts(1); }
+      else if (e.key === 'ArrowUp' || e.key === 'k') { e.preventDefault(); goShorts(-1); }
+      else if (e.key === 'Escape') closeShorts();
+    });
+  }
+
+  function activateShort(idx) {
+    if (state.shortsIndex === idx) return;
+    state.shortsIndex = idx;
+    const v = state.shortsList[idx];
+    if (!v) return;
+
+    const overlay = document.getElementById('shorts-overlay');
+    overlay.querySelector('.shorts-nav.up').disabled = idx === 0;
+    overlay.querySelector('.shorts-nav.down').disabled = idx === state.shortsList.length - 1;
+
+    // Remove active class from all stages
+    overlay.querySelectorAll('.shorts-stage').forEach(el => el.classList.remove('active'));
 
     const mount = () => {
-      state.ytPlayer = new YT.Player('yt-frame', {
-        height: '640',
-        width: '360',
+      // destroy previous player to free memory
+      if (state.ytPlayer && typeof state.ytPlayer.destroy === 'function') {
+        try { state.ytPlayer.destroy(); } catch {}
+        state.ytPlayer = null;
+      }
+      
+      // Also clear old player containers to ensure no stray iframes
+      overlay.querySelectorAll('.player-container').forEach(el => { el.innerHTML = ''; });
+
+      const container = document.getElementById(`player-container-${idx}`);
+      if (!container) return;
+      container.innerHTML = '<div id="shorts-frame"></div>';
+      
+      const stage = overlay.querySelector(`#stage-${idx}`);
+      
+      state.ytPlayer = new YT.Player('shorts-frame', {
         videoId: v.id,
-        playerVars: {
-          autoplay: 1, rel: 0, modestbranding: 1, playsinline: 1, controls: 1,
-        },
+        playerVars: { autoplay: 1, rel: 0, modestbranding: 1, playsinline: 1, controls: 1 },
+        events: {
+          onStateChange: (e) => {
+            if (e.data === YT.PlayerState.PLAYING || e.data === YT.PlayerState.BUFFERING) {
+               if (stage) stage.classList.add('active');
+            }
+          }
+        }
       });
     };
 
-    if (state.ytReady && window.YT && window.YT.Player) mount();
-    else state.pendingPlayId = { videoId: v.id, mount };
-
-    els.player.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    // Debounce the mount slightly to avoid rapid creations during fast scrolling
+    if (state.mountTimeout) clearTimeout(state.mountTimeout);
+    state.mountTimeout = setTimeout(() => {
+      if (state.ytReady && window.YT && window.YT.Player) mount();
+      else state.pendingPlayId = { mount };
+    }, 150);
   }
 
   window.onYouTubeIframeAPIReady = function () {
@@ -213,41 +334,38 @@
     }
   };
 
+  let isSearching = false;
+
   async function runSearch(q) {
     q = (q || '').trim();
-    if (!q) return;
+    if (!q || isSearching) return;
+    
     state.query = q;
+    isSearching = true;
     els.grid.innerHTML = `<div class="loading" style="grid-column:1/-1">Searching…</div>`;
     els.resultsMeta.textContent = '';
+    
     try {
       const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
       const data = await res.json();
       if (!res.ok) {
         const msg = (data && data.error) || `Request failed (${res.status}).`;
         els.grid.innerHTML = `<div class="error" style="grid-column:1/-1">${escapeHtml(msg)}</div>`;
-        if (/api[_ ]?key/i.test(msg)) els.notice.classList.remove('hidden');
+        isSearching = false;
         return;
       }
-      els.notice.classList.add('hidden');
       state.rawItems = data.items || [];
       renderGrid();
     } catch (err) {
       els.grid.innerHTML = `<div class="error" style="grid-column:1/-1">Network error. Is the server running?</div>`;
     }
+    isSearching = false;
   }
 
   els.searchBtn.addEventListener('click', () => runSearch(els.input.value));
   els.input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') runSearch(els.input.value);
   });
-
-  // Probe API key — keep notice visible only if missing.
-  fetch('/api/search?q=__probe__').then(async (r) => {
-    if (r.status === 500) {
-      const d = await r.json().catch(() => ({}));
-      if (/api[_ ]?key/i.test(d.error || '')) els.notice.classList.remove('hidden');
-    }
-  }).catch(() => {});
 
   renderChips();
   renderTopics();

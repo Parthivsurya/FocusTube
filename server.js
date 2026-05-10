@@ -29,6 +29,9 @@ function isoDurationToSeconds(iso) {
   return (parseInt(h || 0, 10) * 3600) + (parseInt(mi || 0, 10) * 60) + parseInt(s || 0, 10);
 }
 
+const cache = new Map();
+const CACHE_TTL = 1000 * 60 * 60; // 1 hour
+
 app.get('/api/search', async (req, res) => {
   const q = (req.query.q || '').toString().trim();
   if (!q) return res.status(400).json({ error: 'Missing query parameter "q".' });
@@ -37,6 +40,15 @@ app.get('/api/search', async (req, res) => {
   const order = ['relevance', 'date', 'viewCount', 'rating', 'title'].includes(req.query.order)
     ? req.query.order
     : 'relevance';
+
+  const cacheKey = `${q}-${order}`;
+  if (cache.has(cacheKey)) {
+    const cached = cache.get(cacheKey);
+    if (Date.now() - cached.timestamp < CACHE_TTL) {
+      console.log(`[FocusTube] Serving "${q}" from cache`);
+      return res.json({ items: cached.items });
+    }
+  }
 
   try {
     const searchUrl = new URL(YT_SEARCH);
@@ -90,6 +102,7 @@ app.get('/api/search', async (req, res) => {
       })
       .filter((v) => v.durationSeconds > 0 && v.durationSeconds <= 60);
 
+    cache.set(cacheKey, { items, timestamp: Date.now() });
     res.json({ items });
   } catch (err) {
     console.error('[FocusTube] /api/search error:', err);
