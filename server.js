@@ -41,7 +41,7 @@ app.get('/api/search', async (req, res) => {
     ? req.query.order
     : 'relevance';
 
-  const cacheKey = `${q}-${order}`;
+  const cacheKey = `${q.toLowerCase()}-${order}`;
   if (cache.has(cacheKey)) {
     const cached = cache.get(cacheKey);
     if (Date.now() - cached.timestamp < CACHE_TTL) {
