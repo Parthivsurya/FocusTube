@@ -269,7 +269,7 @@
     const iframe = document.createElement('iframe');
     iframe.src =
       `https://www.youtube.com/embed/${encodeURIComponent(v.id)}` +
-      `?autoplay=1&playsinline=1&rel=0&modestbranding=1&controls=1`;
+      `?autoplay=1&mute=1&playsinline=1&rel=0&modestbranding=1&controls=1`;
     iframe.allow = 'autoplay; encrypted-media; picture-in-picture; fullscreen';
     iframe.allowFullscreen = true;
     iframe.setAttribute('frameborder', '0');
