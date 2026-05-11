@@ -368,6 +368,21 @@ body.shorts-open { overflow: hidden; }
   z-index: 100;
 }
 .shorts-close:hover { background: rgba(255,255,255,0.2); }
+
+.shorts-mute {
+  position: fixed;
+  top: 16px; left: 16px;
+  width: 38px; height: 38px;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.1);
+  color: #fff;
+  border: none;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  z-index: 100;
+}
+.shorts-mute:hover { background: rgba(255,255,255,0.2); }
 .shorts-nav {
   position: fixed;
   right: 24px;

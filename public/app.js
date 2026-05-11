@@ -13,6 +13,7 @@
   const STORAGE = {
     topics: 'focustube.topics',
     bookmarks: 'focustube.bookmarks',
+    audioUnlocked: 'focustube.audioUnlocked',
   };
 
   const state = {
@@ -25,6 +26,7 @@
     isLoadingMore: false,
     shortsList: [],
     shortsIndex: -1,
+    audioUnlocked: loadJSON(STORAGE.audioUnlocked, false),
   };
 
   function loadJSON(key, fallback) {
@@ -182,6 +184,29 @@
   // One fresh <iframe> per active item. On scroll, tear down the previous
   // iframe (which stops playback) and create a new one with autoplay=1.
 
+  function sendYTCommand(iframe, func, args = []) {
+    if (!iframe || !iframe.contentWindow) return;
+    try {
+      iframe.contentWindow.postMessage(
+        JSON.stringify({ event: 'command', func, args }),
+        'https://www.youtube.com'
+      );
+    } catch {}
+  }
+
+  function currentIframe() {
+    if (state.shortsIndex < 0) return null;
+    const mount = document.getElementById(`player-mount-${state.shortsIndex}`);
+    return mount ? mount.querySelector('iframe') : null;
+  }
+
+  function updateMuteBtn() {
+    const btn = document.querySelector('.shorts-mute');
+    if (!btn) return;
+    btn.textContent = state.audioUnlocked ? '🔊' : '🔇';
+    btn.setAttribute('aria-label', state.audioUnlocked ? 'Mute' : 'Unmute');
+  }
+
   function shortsItemHTML(v, i, total) {
     return `
       <div class="shorts-item" data-index="${i}">
@@ -269,12 +294,29 @@
     const iframe = document.createElement('iframe');
     iframe.src =
       `https://www.youtube.com/embed/${encodeURIComponent(v.id)}` +
-      `?autoplay=1&mute=1&playsinline=1&rel=0&modestbranding=1&controls=1`;
+      `?autoplay=1&mute=1&playsinline=1&rel=0&modestbranding=1&controls=1` +
+      `&enablejsapi=1&origin=${encodeURIComponent(window.location.origin)}`;
     iframe.allow = 'autoplay; encrypted-media; picture-in-picture; fullscreen';
     iframe.allowFullscreen = true;
     iframe.setAttribute('frameborder', '0');
-    mountEl.appendChild(iframe);
 
+    if (state.audioUnlocked) {
+      // YouTube's iframe player listens for postMessage commands a moment
+      // after load — retry a few times to cover initialization races.
+      iframe.addEventListener('load', () => {
+        if (!state.audioUnlocked) return;
+        let tries = 0;
+        const tryUnmute = () => {
+          if (!state.audioUnlocked || currentIframe() !== iframe) return;
+          sendYTCommand(iframe, 'unMute');
+          sendYTCommand(iframe, 'setVolume', [100]);
+          if (++tries < 5) setTimeout(tryUnmute, 400);
+        };
+        setTimeout(tryUnmute, 200);
+      });
+    }
+
+    mountEl.appendChild(iframe);
     stage.classList.add('active');
   }
 
@@ -284,6 +326,7 @@
     overlay.className = 'shorts-overlay';
     overlay.innerHTML = `
       <button class="shorts-close" aria-label="Close">×</button>
+      <button class="shorts-mute" aria-label="Unmute">🔇</button>
       <button class="shorts-nav up" aria-label="Previous">▲</button>
       <button class="shorts-nav down" aria-label="Next">▼</button>
       <div class="shorts-list"></div>
@@ -293,6 +336,18 @@
     overlay.querySelector('.shorts-close').addEventListener('click', closeShorts);
     overlay.querySelector('.shorts-nav.up').addEventListener('click', () => goShorts(-1));
     overlay.querySelector('.shorts-nav.down').addEventListener('click', () => goShorts(1));
+
+    overlay.querySelector('.shorts-mute').addEventListener('click', () => {
+      state.audioUnlocked = !state.audioUnlocked;
+      saveJSON(STORAGE.audioUnlocked, state.audioUnlocked);
+      updateMuteBtn();
+      const iframe = currentIframe();
+      if (iframe) {
+        sendYTCommand(iframe, state.audioUnlocked ? 'unMute' : 'mute');
+        if (state.audioUnlocked) sendYTCommand(iframe, 'setVolume', [100]);
+      }
+    });
+    updateMuteBtn();
 
     document.addEventListener('keydown', (e) => {
       if (!document.body.classList.contains('shorts-open')) return;
