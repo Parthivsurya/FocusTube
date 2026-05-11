@@ -312,7 +312,7 @@
       
       state.ytPlayer = new YT.Player('shorts-frame', {
         videoId: v.id,
-        playerVars: { autoplay: 1, rel: 0, modestbranding: 1, playsinline: 1, controls: 1 },
+        playerVars: { autoplay: 1, rel: 0, modestbranding: 1, playsinline: 1, controls: 1, origin: window.location.origin },
         events: {
           onStateChange: (e) => {
             if (e.data === YT.PlayerState.PLAYING || e.data === YT.PlayerState.BUFFERING) {
