@@ -186,8 +186,24 @@
   }
 
   // --- Shorts overlay ---
-  // A single persistent YouTube iframe is relocated as you scroll.
-  // This bypasses mobile autoplay restrictions by keeping the "blessed" iframe alive.
+  // One fresh <iframe> per active item. On scroll, tear down the previous
+  // iframe (which stops playback) and create a new one with autoplay=1.
+
+  function sendYTCommand(iframe, func, args = []) {
+    if (!iframe || !iframe.contentWindow) return;
+    try {
+      iframe.contentWindow.postMessage(
+        JSON.stringify({ event: 'command', func, args }),
+        'https://www.youtube.com'
+      );
+    } catch {}
+  }
+
+  function currentIframe() {
+    if (state.shortsIndex < 0) return null;
+    const mount = document.getElementById(`player-mount-${state.shortsIndex}`);
+    return mount ? mount.querySelector('iframe') : null;
+  }
 
   function updateMuteBtn() {
     const btn = document.querySelector('.shorts-mute');
@@ -213,84 +229,30 @@
 
   function openShorts(list, startIndex) {
     state.shortsList = list;
+    state.shortsIndex = -1;
     if (!document.getElementById('shorts-overlay')) buildShortsOverlay();
 
     const overlay = document.getElementById('shorts-overlay');
     const listEl = overlay.querySelector('.shorts-list');
-    const wrapper = document.getElementById('persistent-player-wrapper');
-    
-    // Rescue the wrapper before overwriting listEl
-    if (wrapper && wrapper.parentNode !== overlay) {
-      wrapper.style.display = 'none';
-      overlay.appendChild(wrapper);
-    }
-
     listEl.innerHTML = list.map((v, i) => shortsItemHTML(v, i, list.length)).join('');
 
     document.body.classList.add('shorts-open');
     overlay.classList.add('open');
 
-    // Force shortsIndex to allow synchronous activation
-    state.shortsIndex = startIndex;
-    
-    // Sync init player to bypass mobile autoplay restrictions
-    const container = document.getElementById(`player-mount-${startIndex}`);
-    if (container && wrapper) {
-      wrapper.style.display = 'block';
-      container.appendChild(wrapper);
-    }
-    
-    const v = list[startIndex];
-    
-    if (!state.ytPlayer && window.YT && window.YT.Player) {
-       // Create the single persistent iframe
-       state.ytPlayer = new YT.Player('shorts-frame', {
-          videoId: v.id,
-          playerVars: { 
-            autoplay: 1, 
-            rel: 0, 
-            modestbranding: 1, 
-            playsinline: 1, 
-            controls: 1, 
-            origin: window.location.origin,
-            mute: state.audioUnlocked ? 0 : 1 // Start unmuted if user unlocked audio!
-          },
-          events: {
-            onStateChange: (e) => {
-              if (e.data === YT.PlayerState.PLAYING || e.data === YT.PlayerState.BUFFERING) {
-                 const activeStage = document.getElementById(`stage-${state.shortsIndex}`);
-                 if (activeStage) activeStage.classList.add('active');
-              }
-            }
-          }
-       });
-    } else if (state.ytPlayer && typeof state.ytPlayer.loadVideoById === 'function') {
-       if (state.audioUnlocked) state.ytPlayer.unMute();
-       else state.ytPlayer.mute();
-       state.ytPlayer.loadVideoById(v.id);
-       const activeStage = document.getElementById(`stage-${startIndex}`);
-       if (activeStage) activeStage.classList.add('active');
-    }
-
+    // Snap to startIndex, then activate. Order matters so the scroll handler
+    // does not race-activate idx=0 before we have a chance to play startIndex.
     const target = listEl.querySelector(`.shorts-item[data-index="${startIndex}"]`);
-    if (target) {
-      // Small timeout ensures the DOM has rendered the list before scrolling
-      setTimeout(() => target.scrollIntoView({ behavior: 'auto' }), 0);
-    }
+    if (target) target.scrollIntoView({ behavior: 'auto' });
+    activateShort(startIndex, 'click');
   }
 
   function closeShorts() {
     const overlay = document.getElementById('shorts-overlay');
     if (overlay) overlay.classList.remove('open');
     document.body.classList.remove('shorts-open');
-    if (state.ytPlayer && typeof state.ytPlayer.stopVideo === 'function') {
-      try { state.ytPlayer.stopVideo(); } catch {}
-    }
-    
-    const wrapper = document.getElementById('persistent-player-wrapper');
-    if (wrapper && overlay) {
-      wrapper.style.display = 'none';
-      overlay.appendChild(wrapper);
+    // Tear down every loaded iframe (current + preloaded neighbors).
+    if (state.shortsList && state.shortsList.length) {
+      state.shortsList.forEach((_, i) => cleanupIframeFor(i));
     }
     state.shortsIndex = -1;
   }
@@ -298,12 +260,72 @@
   function goShorts(delta) {
     const next = state.shortsIndex + delta;
     if (next < 0 || next >= state.shortsList.length) return;
-    
-    activateShort(next, 'click');
-
-    const listEl = document.querySelector('.shorts-list');
+    const overlay = document.getElementById('shorts-overlay');
+    const listEl = overlay.querySelector('.shorts-list');
     const target = listEl.querySelector(`.shorts-item[data-index="${next}"]`);
     if (target) target.scrollIntoView({ behavior: 'smooth' });
+    activateShort(next, 'click');
+  }
+
+  // Build an iframe element (does not append). Caller decides parent + timing,
+  // which matters for autoplay: a fresh iframe appended inside a user gesture
+  // (touchend/click) inherits transient activation, letting youtube.com
+  // autoplay with sound. Preloaded ones are always created muted.
+  function buildPlayerIframe(idx, { autoplay, mute }) {
+    const v = state.shortsList[idx];
+    if (!v) return null;
+    const iframe = document.createElement('iframe');
+    iframe.setAttribute('allow', 'autoplay; encrypted-media; picture-in-picture; fullscreen');
+    iframe.setAttribute('allowfullscreen', '');
+    iframe.setAttribute('frameborder', '0');
+    iframe.setAttribute('playsinline', '');
+    iframe.dataset.idx = String(idx);
+    iframe.src =
+      `https://www.youtube.com/embed/${encodeURIComponent(v.id)}` +
+      `?autoplay=${autoplay ? 1 : 0}&mute=${mute ? 1 : 0}&playsinline=1&rel=0&modestbranding=1&controls=1` +
+      `&enablejsapi=1&origin=${encodeURIComponent(window.location.origin)}`;
+    return iframe;
+  }
+
+  function ensureIframeFor(idx) {
+    if (state.shortsIndex < 0 || Math.abs(idx - state.shortsIndex) > 1) return null;
+    const mount = document.getElementById(`player-mount-${idx}`);
+    if (!mount) return null;
+    let iframe = mount.querySelector('iframe');
+    if (iframe) return iframe;
+
+    const isActive = idx === state.shortsIndex;
+    iframe = buildPlayerIframe(idx, { autoplay: isActive, mute: true });
+    if (!iframe) return null;
+
+    iframe.addEventListener('load', () => {
+      if (parseInt(iframe.dataset.idx, 10) === state.shortsIndex) {
+        kickPlay(iframe);
+      }
+    });
+
+    mount.appendChild(iframe);
+    return iframe;
+  }
+
+  function cleanupIframeFor(idx) {
+    const mount = document.getElementById(`player-mount-${idx}`);
+    if (mount) mount.innerHTML = '';
+    const stage = document.getElementById(`stage-${idx}`);
+    if (stage) stage.classList.remove('active');
+  }
+
+  // Only used for muted resume of preloaded iframes (audio-locked path).
+  // The unmuted path uses fresh-iframe creation in activateShort instead,
+  // because postMessage('unMute') on mobile pauses the cross-origin iframe.
+  function kickPlay(iframe) {
+    let tries = 0;
+    const kick = () => {
+      if (parseInt(iframe.dataset.idx, 10) !== state.shortsIndex) return;
+      sendYTCommand(iframe, 'playVideo');
+      if (++tries < 6) setTimeout(kick, 300);
+    };
+    setTimeout(kick, 100);
   }
 
   function activateShort(idx, source = 'click') {
@@ -314,9 +336,21 @@
     const overlay = document.getElementById('shorts-overlay');
     if (!overlay) return;
 
-    overlay.querySelectorAll('.shorts-stage').forEach(el => el.classList.remove('active'));
+    // Pause + hide the previous one (but keep its iframe alive if it's still in the window).
+    if (state.shortsIndex >= 0) {
+      const prevMount = document.getElementById(`player-mount-${state.shortsIndex}`);
+      const prevIframe = prevMount && prevMount.querySelector('iframe');
+      if (prevIframe) sendYTCommand(prevIframe, 'pauseVideo');
+      const prevStage = document.getElementById(`stage-${state.shortsIndex}`);
+      if (prevStage) prevStage.classList.remove('active');
+    }
 
     state.shortsIndex = idx;
+
+    // Destroy iframes outside the [idx-1, idx+1] window to bound memory.
+    state.shortsList.forEach((_, i) => {
+      if (Math.abs(i - idx) > 1) cleanupIframeFor(i);
+    });
 
     const upBtn = overlay.querySelector('.shorts-nav.up');
     const downBtn = overlay.querySelector('.shorts-nav.down');
@@ -324,22 +358,34 @@
     if (downBtn) downBtn.disabled = idx === state.shortsList.length - 1;
 
     const mount = document.getElementById(`player-mount-${idx}`);
-    const wrapper = document.getElementById('persistent-player-wrapper');
-    
-    if (mount && wrapper) {
-      wrapper.style.display = 'block';
-      mount.appendChild(wrapper);
-    }
-    
-    const v = state.shortsList[idx];
     const stage = document.getElementById(`stage-${idx}`);
-    
-    if (state.ytPlayer && typeof state.ytPlayer.loadVideoById === 'function') {
-       if (state.audioUnlocked) state.ytPlayer.unMute();
-       else state.ytPlayer.mute();
-       
-       state.ytPlayer.loadVideoById(v.id);
-       if (stage) stage.classList.add('active');
+    if (!mount || !stage) return;
+
+    let iframe = mount.querySelector('iframe');
+    // When audio is unlocked, we must build a FRESH iframe with mute=0 in the
+    // URL — and do it synchronously inside the current user gesture so the
+    // transient activation propagates to youtube.com. Preloaded muted iframes
+    // can't be promoted to unmuted via postMessage on mobile (browser pauses).
+    if (state.audioUnlocked) {
+      if (iframe) {
+        iframe.remove();
+        iframe = null;
+      }
+      iframe = buildPlayerIframe(idx, { autoplay: true, mute: false });
+      if (iframe) mount.appendChild(iframe);
+    } else if (iframe) {
+      kickPlay(iframe);
+    } else {
+      iframe = ensureIframeFor(idx);
+    }
+    stage.classList.add('active');
+
+    // Preload neighbors in the background so scrolling is instant.
+    if (idx + 1 < state.shortsList.length) {
+      setTimeout(() => ensureIframeFor(idx + 1), 250);
+    }
+    if (idx - 1 >= 0) {
+      setTimeout(() => ensureIframeFor(idx - 1), 500);
     }
   }
 
@@ -352,9 +398,6 @@
       <button class="shorts-mute" aria-label="Unmute">🔇</button>
       <button class="shorts-nav up" aria-label="Previous">▲</button>
       <button class="shorts-nav down" aria-label="Next">▼</button>
-      <div id="persistent-player-wrapper" style="display: none; width: 100%; height: 100%;">
-        <div id="shorts-frame"></div>
-      </div>
       <div class="shorts-list"></div>
     `;
     document.body.appendChild(overlay);
@@ -367,12 +410,10 @@
       state.audioUnlocked = !state.audioUnlocked;
       saveJSON(STORAGE.audioUnlocked, state.audioUnlocked);
       updateMuteBtn();
-      if (state.ytPlayer && typeof state.ytPlayer.unMute === 'function') {
-        if (state.audioUnlocked) {
-          state.ytPlayer.unMute();
-        } else {
-          state.ytPlayer.mute();
-        }
+      const iframe = currentIframe();
+      if (iframe) {
+        sendYTCommand(iframe, state.audioUnlocked ? 'unMute' : 'mute');
+        if (state.audioUnlocked) sendYTCommand(iframe, 'setVolume', [100]);
       }
     });
     updateMuteBtn();
