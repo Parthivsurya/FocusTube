@@ -27,6 +27,11 @@
     shortsList: [],
     shortsIndex: -1,
     audioUnlocked: loadJSON(STORAGE.audioUnlocked, false),
+    // Why activateShort was called: 'click' (strong gesture: button, key,
+    // card-tap, speaker) vs 'scroll' (touchend / wheel / scrollend). Mobile
+    // browsers treat touch-after-scroll as a weak gesture — sending unMute
+    // pauses the iframe. kickPlay reads this to decide whether to send unMute.
+    lastSource: 'click',
   };
 
   function loadJSON(key, fallback) {
@@ -238,7 +243,7 @@
     // does not race-activate idx=0 before we have a chance to play startIndex.
     const target = listEl.querySelector(`.shorts-item[data-index="${startIndex}"]`);
     if (target) target.scrollIntoView({ behavior: 'auto' });
-    activateShort(startIndex);
+    activateShort(startIndex, 'click');
   }
 
   function closeShorts() {
@@ -259,36 +264,45 @@
     const listEl = overlay.querySelector('.shorts-list');
     const target = listEl.querySelector(`.shorts-item[data-index="${next}"]`);
     if (target) target.scrollIntoView({ behavior: 'smooth' });
-    activateShort(next);
+    activateShort(next, 'click');
   }
 
-  function ensureIframeFor(idx) {
-    if (state.shortsIndex < 0 || Math.abs(idx - state.shortsIndex) > 1) return null;
+  // Build an iframe element (does not append). Caller decides parent + timing,
+  // which matters for autoplay: a fresh iframe appended inside a user gesture
+  // (touchend/click) inherits transient activation, letting youtube.com
+  // autoplay with sound. Preloaded ones are always created muted.
+  function buildPlayerIframe(idx, { autoplay, mute }) {
     const v = state.shortsList[idx];
-    const mount = document.getElementById(`player-mount-${idx}`);
-    if (!v || !mount) return null;
-    let iframe = mount.querySelector('iframe');
-    if (iframe) return iframe;
-
-    iframe = document.createElement('iframe');
+    if (!v) return null;
+    const iframe = document.createElement('iframe');
     iframe.setAttribute('allow', 'autoplay; encrypted-media; picture-in-picture; fullscreen');
     iframe.setAttribute('allowfullscreen', '');
     iframe.setAttribute('frameborder', '0');
     iframe.setAttribute('playsinline', '');
     iframe.dataset.idx = String(idx);
+    iframe.src =
+      `https://www.youtube.com/embed/${encodeURIComponent(v.id)}` +
+      `?autoplay=${autoplay ? 1 : 0}&mute=${mute ? 1 : 0}&playsinline=1&rel=0&modestbranding=1&controls=1` +
+      `&enablejsapi=1&origin=${encodeURIComponent(window.location.origin)}`;
+    return iframe;
+  }
+
+  function ensureIframeFor(idx) {
+    if (state.shortsIndex < 0 || Math.abs(idx - state.shortsIndex) > 1) return null;
+    const mount = document.getElementById(`player-mount-${idx}`);
+    if (!mount) return null;
+    let iframe = mount.querySelector('iframe');
+    if (iframe) return iframe;
 
     const isActive = idx === state.shortsIndex;
+    iframe = buildPlayerIframe(idx, { autoplay: isActive, mute: true });
+    if (!iframe) return null;
+
     iframe.addEventListener('load', () => {
-      // If by the time load fires this iframe is the active one, kick play.
       if (parseInt(iframe.dataset.idx, 10) === state.shortsIndex) {
         kickPlay(iframe);
       }
     });
-
-    iframe.src =
-      `https://www.youtube.com/embed/${encodeURIComponent(v.id)}` +
-      `?autoplay=${isActive ? 1 : 0}&mute=1&playsinline=1&rel=0&modestbranding=1&controls=1` +
-      `&enablejsapi=1&origin=${encodeURIComponent(window.location.origin)}`;
 
     mount.appendChild(iframe);
     return iframe;
@@ -301,23 +315,23 @@
     if (stage) stage.classList.remove('active');
   }
 
+  // Only used for muted resume of preloaded iframes (audio-locked path).
+  // The unmuted path uses fresh-iframe creation in activateShort instead,
+  // because postMessage('unMute') on mobile pauses the cross-origin iframe.
   function kickPlay(iframe) {
     let tries = 0;
     const kick = () => {
       if (parseInt(iframe.dataset.idx, 10) !== state.shortsIndex) return;
       sendYTCommand(iframe, 'playVideo');
-      if (state.audioUnlocked) {
-        sendYTCommand(iframe, 'unMute');
-        sendYTCommand(iframe, 'setVolume', [100]);
-      }
       if (++tries < 6) setTimeout(kick, 300);
     };
     setTimeout(kick, 100);
   }
 
-  function activateShort(idx) {
+  function activateShort(idx, source = 'click') {
     if (idx < 0 || idx >= state.shortsList.length) return;
     if (state.shortsIndex === idx) return;
+    state.lastSource = source;
 
     const overlay = document.getElementById('shorts-overlay');
     if (!overlay) return;
@@ -348,8 +362,18 @@
     if (!mount || !stage) return;
 
     let iframe = mount.querySelector('iframe');
-    if (iframe) {
-      // Preloaded — just resume.
+    // When audio is unlocked, we must build a FRESH iframe with mute=0 in the
+    // URL — and do it synchronously inside the current user gesture so the
+    // transient activation propagates to youtube.com. Preloaded muted iframes
+    // can't be promoted to unmuted via postMessage on mobile (browser pauses).
+    if (state.audioUnlocked) {
+      if (iframe) {
+        iframe.remove();
+        iframe = null;
+      }
+      iframe = buildPlayerIframe(idx, { autoplay: true, mute: false });
+      if (iframe) mount.appendChild(iframe);
+    } else if (iframe) {
       kickPlay(iframe);
     } else {
       iframe = ensureIframeFor(idx);
@@ -415,7 +439,7 @@
     };
     const settleTo = (idx) => {
       if (idx < 0 || idx >= state.shortsList.length) return;
-      if (idx !== state.shortsIndex) activateShort(idx);
+      if (idx !== state.shortsIndex) activateShort(idx, 'scroll');
       if (idx >= state.shortsList.length - 5) loadMore();
     };
     const onScrollSettle = () => {
@@ -468,7 +492,7 @@
       // Synchronous activation inside the gesture context — this is the bit
       // that unlocks autoplay on mobile.
       if (targetIdx !== state.shortsIndex) {
-        activateShort(targetIdx);
+        activateShort(targetIdx, 'scroll');
         // Make sure the scroll lands on it, even if snap was about to revert.
         const target = listEl.querySelector(`.shorts-item[data-index="${targetIdx}"]`);
         if (target) target.scrollIntoView({ behavior: 'smooth' });
