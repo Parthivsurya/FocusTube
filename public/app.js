@@ -245,11 +245,9 @@
     const overlay = document.getElementById('shorts-overlay');
     if (overlay) overlay.classList.remove('open');
     document.body.classList.remove('shorts-open');
-    if (state.shortsIndex >= 0) {
-      const mount = document.getElementById(`player-mount-${state.shortsIndex}`);
-      if (mount) mount.innerHTML = '';
-      const stage = document.getElementById(`stage-${state.shortsIndex}`);
-      if (stage) stage.classList.remove('active');
+    // Tear down every loaded iframe (current + preloaded neighbors).
+    if (state.shortsList && state.shortsList.length) {
+      state.shortsList.forEach((_, i) => cleanupIframeFor(i));
     }
     state.shortsIndex = -1;
   }
@@ -264,6 +262,59 @@
     activateShort(next);
   }
 
+  function ensureIframeFor(idx) {
+    if (state.shortsIndex < 0 || Math.abs(idx - state.shortsIndex) > 1) return null;
+    const v = state.shortsList[idx];
+    const mount = document.getElementById(`player-mount-${idx}`);
+    if (!v || !mount) return null;
+    let iframe = mount.querySelector('iframe');
+    if (iframe) return iframe;
+
+    iframe = document.createElement('iframe');
+    iframe.setAttribute('allow', 'autoplay; encrypted-media; picture-in-picture; fullscreen');
+    iframe.setAttribute('allowfullscreen', '');
+    iframe.setAttribute('frameborder', '0');
+    iframe.setAttribute('playsinline', '');
+    iframe.dataset.idx = String(idx);
+
+    const isActive = idx === state.shortsIndex;
+    iframe.addEventListener('load', () => {
+      // If by the time load fires this iframe is the active one, kick play.
+      if (parseInt(iframe.dataset.idx, 10) === state.shortsIndex) {
+        kickPlay(iframe);
+      }
+    });
+
+    iframe.src =
+      `https://www.youtube.com/embed/${encodeURIComponent(v.id)}` +
+      `?autoplay=${isActive ? 1 : 0}&mute=1&playsinline=1&rel=0&modestbranding=1&controls=1` +
+      `&enablejsapi=1&origin=${encodeURIComponent(window.location.origin)}`;
+
+    mount.appendChild(iframe);
+    return iframe;
+  }
+
+  function cleanupIframeFor(idx) {
+    const mount = document.getElementById(`player-mount-${idx}`);
+    if (mount) mount.innerHTML = '';
+    const stage = document.getElementById(`stage-${idx}`);
+    if (stage) stage.classList.remove('active');
+  }
+
+  function kickPlay(iframe) {
+    let tries = 0;
+    const kick = () => {
+      if (parseInt(iframe.dataset.idx, 10) !== state.shortsIndex) return;
+      sendYTCommand(iframe, 'playVideo');
+      if (state.audioUnlocked) {
+        sendYTCommand(iframe, 'unMute');
+        sendYTCommand(iframe, 'setVolume', [100]);
+      }
+      if (++tries < 6) setTimeout(kick, 300);
+    };
+    setTimeout(kick, 100);
+  }
+
   function activateShort(idx) {
     if (idx < 0 || idx >= state.shortsList.length) return;
     if (state.shortsIndex === idx) return;
@@ -271,53 +322,47 @@
     const overlay = document.getElementById('shorts-overlay');
     if (!overlay) return;
 
-    // Tear down previous iframe — stops playback and frees memory.
+    // Pause + hide the previous one (but keep its iframe alive if it's still in the window).
     if (state.shortsIndex >= 0) {
       const prevMount = document.getElementById(`player-mount-${state.shortsIndex}`);
-      if (prevMount) prevMount.innerHTML = '';
+      const prevIframe = prevMount && prevMount.querySelector('iframe');
+      if (prevIframe) sendYTCommand(prevIframe, 'pauseVideo');
       const prevStage = document.getElementById(`stage-${state.shortsIndex}`);
       if (prevStage) prevStage.classList.remove('active');
     }
 
     state.shortsIndex = idx;
 
+    // Destroy iframes outside the [idx-1, idx+1] window to bound memory.
+    state.shortsList.forEach((_, i) => {
+      if (Math.abs(i - idx) > 1) cleanupIframeFor(i);
+    });
+
     const upBtn = overlay.querySelector('.shorts-nav.up');
     const downBtn = overlay.querySelector('.shorts-nav.down');
     if (upBtn) upBtn.disabled = idx === 0;
     if (downBtn) downBtn.disabled = idx === state.shortsList.length - 1;
 
-    const v = state.shortsList[idx];
-    const mountEl = document.getElementById(`player-mount-${idx}`);
+    const mount = document.getElementById(`player-mount-${idx}`);
     const stage = document.getElementById(`stage-${idx}`);
-    if (!v || !mountEl || !stage) return;
+    if (!mount || !stage) return;
 
-    const iframe = document.createElement('iframe');
-    iframe.src =
-      `https://www.youtube.com/embed/${encodeURIComponent(v.id)}` +
-      `?autoplay=1&mute=1&playsinline=1&rel=0&modestbranding=1&controls=1` +
-      `&enablejsapi=1&origin=${encodeURIComponent(window.location.origin)}`;
-    iframe.allow = 'autoplay; encrypted-media; picture-in-picture; fullscreen';
-    iframe.allowFullscreen = true;
-    iframe.setAttribute('frameborder', '0');
-
-    if (state.audioUnlocked) {
-      // YouTube's iframe player listens for postMessage commands a moment
-      // after load — retry a few times to cover initialization races.
-      iframe.addEventListener('load', () => {
-        if (!state.audioUnlocked) return;
-        let tries = 0;
-        const tryUnmute = () => {
-          if (!state.audioUnlocked || currentIframe() !== iframe) return;
-          sendYTCommand(iframe, 'unMute');
-          sendYTCommand(iframe, 'setVolume', [100]);
-          if (++tries < 5) setTimeout(tryUnmute, 400);
-        };
-        setTimeout(tryUnmute, 200);
-      });
+    let iframe = mount.querySelector('iframe');
+    if (iframe) {
+      // Preloaded — just resume.
+      kickPlay(iframe);
+    } else {
+      iframe = ensureIframeFor(idx);
     }
-
-    mountEl.appendChild(iframe);
     stage.classList.add('active');
+
+    // Preload neighbors in the background so scrolling is instant.
+    if (idx + 1 < state.shortsList.length) {
+      setTimeout(() => ensureIframeFor(idx + 1), 250);
+    }
+    if (idx - 1 >= 0) {
+      setTimeout(() => ensureIframeFor(idx - 1), 500);
+    }
   }
 
   function buildShortsOverlay() {
