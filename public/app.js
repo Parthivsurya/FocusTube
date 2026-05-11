@@ -21,11 +21,10 @@
     rawItems: [],
     bookmarks: loadJSON(STORAGE.bookmarks, {}),
     topics: loadJSON(STORAGE.topics, ['biryani making', 'gym workout', 'python coding']),
-    ytPlayer: null,
-    ytReady: false,
-    pendingPlayId: null,
     nextPageToken: null,
     isLoadingMore: false,
+    shortsList: [],
+    shortsIndex: -1,
   };
 
   function loadJSON(key, fallback) {
@@ -179,113 +178,55 @@
     });
   }
 
-  // --- Shorts overlay (native scroll snapping) ---
-  // Uses the YouTube IFrame API — embedding does NOT consume Data API quota,
-  // so scrolling through cached results never triggers /api/search.
+  // --- Shorts overlay ---
+  // One fresh <iframe> per active item. On scroll, tear down the previous
+  // iframe (which stops playback) and create a new one with autoplay=1.
 
-  function openShorts(list, startIndex) {
-    state.shortsList = list;
-    if (!document.getElementById('shorts-overlay')) buildShortsOverlay();
-    
-    const overlay = document.getElementById('shorts-overlay');
-    const listEl = overlay.querySelector('.shorts-list');
-    const wrapper = document.getElementById('persistent-player-wrapper');
-    
-    // Rescue the wrapper before overwriting listEl
-    if (wrapper && wrapper.parentNode !== overlay) {
-      wrapper.style.display = 'none';
-      overlay.appendChild(wrapper);
-    }
-    
-    // Build items
-    listEl.innerHTML = list.map((v, i) => `
+  function shortsItemHTML(v, i, total) {
+    return `
       <div class="shorts-item" data-index="${i}">
         <div class="shorts-stage" id="stage-${i}">
           <div class="thumb" style="background-image: url('${escapeHtml(v.thumbnail)}')"></div>
-          <div class="player-container" id="player-container-${i}"></div>
+          <div class="player-mount" id="player-mount-${i}"></div>
           <div class="shorts-meta">
             <div class="t">${escapeHtml(v.title)}</div>
             <div class="m">${escapeHtml(v.channelTitle || '')} · ${formatViews(v.viewCount)}</div>
-            <div class="i">${i + 1} / <span class="total-count">${list.length}</span></div>
+            <div class="i">${i + 1} / <span class="total-count">${total}</span></div>
           </div>
         </div>
-      </div>
-    `).join('');
+      </div>`;
+  }
+
+  function openShorts(list, startIndex) {
+    state.shortsList = list;
+    state.shortsIndex = -1;
+    if (!document.getElementById('shorts-overlay')) buildShortsOverlay();
+
+    const overlay = document.getElementById('shorts-overlay');
+    const listEl = overlay.querySelector('.shorts-list');
+    listEl.innerHTML = list.map((v, i) => shortsItemHTML(v, i, list.length)).join('');
 
     document.body.classList.add('shorts-open');
     overlay.classList.add('open');
 
-    // Force shortsIndex to allow the first activateShort logic to run synchronously
-    state.shortsIndex = startIndex;
-    
-    // Sync init player to bypass mobile autoplay restrictions
-    const container = document.getElementById(`player-container-${startIndex}`);
-    if (container && wrapper) {
-      wrapper.style.display = 'block';
-      container.appendChild(wrapper);
-    }
-    
-    const v = list[startIndex];
-    if (!state.ytPlayer && state.ytReady && window.YT && window.YT.Player) {
-       state.ytPlayer = new YT.Player('shorts-frame', {
-          videoId: v.id,
-          playerVars: { autoplay: 1, rel: 0, modestbranding: 1, playsinline: 1, controls: 1, origin: window.location.origin },
-          events: {
-            onStateChange: (e) => {
-              if (e.data === YT.PlayerState.PLAYING || e.data === YT.PlayerState.BUFFERING) {
-                 const activeStage = document.getElementById(`stage-${state.shortsIndex}`);
-                 if (activeStage) activeStage.classList.add('active');
-              }
-            }
-          }
-       });
-    } else if (state.ytPlayer && typeof state.ytPlayer.loadVideoById === 'function') {
-       state.ytPlayer.loadVideoById(v.id);
-       const activeStage = document.getElementById(`stage-${startIndex}`);
-       if (activeStage) activeStage.classList.add('active');
-    }
-
-    // Setup intersection observer for the items
-    if (state.shortsObserver) state.shortsObserver.disconnect();
-    state.shortsObserver = new IntersectionObserver((entries) => {
-      entries.forEach(entry => {
-        if (entry.isIntersecting) {
-          const idx = parseInt(entry.target.dataset.index, 10);
-          activateShort(idx);
-          if (idx >= state.shortsList.length - 5) {
-            loadMore();
-          }
-        }
-      });
-    }, {
-      root: listEl,
-      threshold: 0.6
-    });
-
-    listEl.querySelectorAll('.shorts-item').forEach(el => state.shortsObserver.observe(el));
-
-    // Scroll to the start index
-    requestAnimationFrame(() => {
-      const target = listEl.querySelector(`.shorts-item[data-index="${startIndex}"]`);
-      if (target) {
-        target.scrollIntoView({ behavior: 'auto' });
-      }
-    });
+    // Snap to startIndex, then activate. Order matters so the scroll handler
+    // does not race-activate idx=0 before we have a chance to play startIndex.
+    const target = listEl.querySelector(`.shorts-item[data-index="${startIndex}"]`);
+    if (target) target.scrollIntoView({ behavior: 'auto' });
+    activateShort(startIndex);
   }
 
   function closeShorts() {
     const overlay = document.getElementById('shorts-overlay');
     if (overlay) overlay.classList.remove('open');
     document.body.classList.remove('shorts-open');
-    if (state.ytPlayer && typeof state.ytPlayer.stopVideo === 'function') {
-      try { state.ytPlayer.stopVideo(); } catch {}
+    if (state.shortsIndex >= 0) {
+      const mount = document.getElementById(`player-mount-${state.shortsIndex}`);
+      if (mount) mount.innerHTML = '';
+      const stage = document.getElementById(`stage-${state.shortsIndex}`);
+      if (stage) stage.classList.remove('active');
     }
-    
-    const wrapper = document.getElementById('persistent-player-wrapper');
-    if (wrapper && overlay) {
-      wrapper.style.display = 'none';
-      overlay.appendChild(wrapper);
-    }
+    state.shortsIndex = -1;
   }
 
   function goShorts(delta) {
@@ -294,9 +235,47 @@
     const overlay = document.getElementById('shorts-overlay');
     const listEl = overlay.querySelector('.shorts-list');
     const target = listEl.querySelector(`.shorts-item[data-index="${next}"]`);
-    if (target) {
-      target.scrollIntoView({ behavior: 'smooth' });
+    if (target) target.scrollIntoView({ behavior: 'smooth' });
+    activateShort(next);
+  }
+
+  function activateShort(idx) {
+    if (idx < 0 || idx >= state.shortsList.length) return;
+    if (state.shortsIndex === idx) return;
+
+    const overlay = document.getElementById('shorts-overlay');
+    if (!overlay) return;
+
+    // Tear down previous iframe — stops playback and frees memory.
+    if (state.shortsIndex >= 0) {
+      const prevMount = document.getElementById(`player-mount-${state.shortsIndex}`);
+      if (prevMount) prevMount.innerHTML = '';
+      const prevStage = document.getElementById(`stage-${state.shortsIndex}`);
+      if (prevStage) prevStage.classList.remove('active');
     }
+
+    state.shortsIndex = idx;
+
+    const upBtn = overlay.querySelector('.shorts-nav.up');
+    const downBtn = overlay.querySelector('.shorts-nav.down');
+    if (upBtn) upBtn.disabled = idx === 0;
+    if (downBtn) downBtn.disabled = idx === state.shortsList.length - 1;
+
+    const v = state.shortsList[idx];
+    const mountEl = document.getElementById(`player-mount-${idx}`);
+    const stage = document.getElementById(`stage-${idx}`);
+    if (!v || !mountEl || !stage) return;
+
+    const iframe = document.createElement('iframe');
+    iframe.src =
+      `https://www.youtube.com/embed/${encodeURIComponent(v.id)}` +
+      `?autoplay=1&playsinline=1&rel=0&modestbranding=1&controls=1`;
+    iframe.allow = 'autoplay; encrypted-media; picture-in-picture; fullscreen';
+    iframe.allowFullscreen = true;
+    iframe.setAttribute('frameborder', '0');
+    mountEl.appendChild(iframe);
+
+    stage.classList.add('active');
   }
 
   function buildShortsOverlay() {
@@ -307,9 +286,6 @@
       <button class="shorts-close" aria-label="Close">×</button>
       <button class="shorts-nav up" aria-label="Previous">▲</button>
       <button class="shorts-nav down" aria-label="Next">▼</button>
-      <div id="persistent-player-wrapper" style="display: none; width: 100%; height: 100%;">
-        <div id="shorts-frame"></div>
-      </div>
       <div class="shorts-list"></div>
     `;
     document.body.appendChild(overlay);
@@ -324,66 +300,29 @@
       else if (e.key === 'ArrowUp' || e.key === 'k') { e.preventDefault(); goShorts(-1); }
       else if (e.key === 'Escape') closeShorts();
     });
-  }
 
-  function activateShort(idx) {
-    if (state.shortsIndex === idx) return;
-    state.shortsIndex = idx;
-    const v = state.shortsList[idx];
-    if (!v) return;
-
-    const overlay = document.getElementById('shorts-overlay');
-    overlay.querySelector('.shorts-nav.up').disabled = idx === 0;
-    overlay.querySelector('.shorts-nav.down').disabled = idx === state.shortsList.length - 1;
-
-    // Remove active class from all stages
-    overlay.querySelectorAll('.shorts-stage').forEach(el => el.classList.remove('active'));
-
-    const mount = () => {
-      const container = document.getElementById(`player-container-${idx}`);
-      const wrapper = document.getElementById('persistent-player-wrapper');
-      
-      if (container && wrapper) {
-        wrapper.style.display = 'block';
-        container.appendChild(wrapper);
-      }
-      
-      const stage = overlay.querySelector(`#stage-${idx}`);
-      
-      if (!state.ytPlayer) {
-        state.ytPlayer = new YT.Player('shorts-frame', {
-          videoId: v.id,
-          playerVars: { autoplay: 1, rel: 0, modestbranding: 1, playsinline: 1, controls: 1, origin: window.location.origin },
-          events: {
-            onStateChange: (e) => {
-              if (e.data === YT.PlayerState.PLAYING || e.data === YT.PlayerState.BUFFERING) {
-                 const activeStage = document.getElementById(`stage-${state.shortsIndex}`);
-                 if (activeStage) activeStage.classList.add('active');
-              }
-            }
-          }
-        });
-      } else if (typeof state.ytPlayer.loadVideoById === 'function') {
-        state.ytPlayer.loadVideoById(v.id);
-        if (stage) stage.classList.add('active');
-      }
+    const listEl = overlay.querySelector('.shorts-list');
+    let scrollTimer = null;
+    const onScrollSettle = () => {
+      if (!state.shortsList || !state.shortsList.length) return;
+      const itemHeight = listEl.clientHeight;
+      if (!itemHeight) return;
+      const idx = Math.round(listEl.scrollTop / itemHeight);
+      if (idx < 0 || idx >= state.shortsList.length) return;
+      if (idx !== state.shortsIndex) activateShort(idx);
+      if (idx >= state.shortsList.length - 5) loadMore();
     };
-
-    // Debounce the mount slightly to avoid rapid creations during fast scrolling
-    if (state.mountTimeout) clearTimeout(state.mountTimeout);
-    state.mountTimeout = setTimeout(() => {
-      if (state.ytReady && window.YT && window.YT.Player) mount();
-      else state.pendingPlayId = { mount };
-    }, 150);
-  }
-
-  window.onYouTubeIframeAPIReady = function () {
-    state.ytReady = true;
-    if (state.pendingPlayId) {
-      state.pendingPlayId.mount();
-      state.pendingPlayId = null;
+    listEl.addEventListener('scroll', () => {
+      if (scrollTimer) clearTimeout(scrollTimer);
+      scrollTimer = setTimeout(onScrollSettle, 100);
+    }, { passive: true });
+    if ('onscrollend' in window) {
+      listEl.addEventListener('scrollend', () => {
+        if (scrollTimer) clearTimeout(scrollTimer);
+        onScrollSettle();
+      });
     }
-  };
+  }
 
   let isSearching = false;
 
@@ -448,32 +387,18 @@
     if (!overlay) return;
     const listEl = overlay.querySelector('.shorts-list');
     const startIdx = state.shortsList.length;
-    
+
     state.shortsList.push(...newItems);
-    
-    const newHtml = newItems.map((v, i) => {
-      const idx = startIdx + i;
-      return `
-        <div class="shorts-item" data-index="${idx}">
-          <div class="shorts-stage" id="stage-${idx}">
-            <div class="thumb" style="background-image: url('${escapeHtml(v.thumbnail)}')"></div>
-            <div class="player-container" id="player-container-${idx}"></div>
-            <div class="shorts-meta">
-              <div class="t">${escapeHtml(v.title)}</div>
-              <div class="m">${escapeHtml(v.channelTitle || '')} · ${formatViews(v.viewCount)}</div>
-              <div class="i">${idx + 1} / <span class="total-count">${state.shortsList.length}</span></div>
-            </div>
-          </div>
-        </div>
-      `;
-    }).join('');
-    
-    listEl.querySelectorAll('.total-count').forEach(el => el.textContent = state.shortsList.length);
+
+    const newHtml = newItems
+      .map((v, i) => shortsItemHTML(v, startIdx + i, state.shortsList.length))
+      .join('');
+
+    listEl.querySelectorAll('.total-count').forEach((el) => {
+      el.textContent = state.shortsList.length;
+    });
     listEl.insertAdjacentHTML('beforeend', newHtml);
-    
-    const addedItems = Array.from(listEl.querySelectorAll('.shorts-item')).slice(startIdx);
-    addedItems.forEach(el => state.shortsObserver.observe(el));
-    
+
     if (state.shortsIndex < state.shortsList.length - 1) {
       overlay.querySelector('.shorts-nav.down').disabled = false;
     }
