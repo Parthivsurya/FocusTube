@@ -24,6 +24,8 @@
     ytPlayer: null,
     ytReady: false,
     pendingPlayId: null,
+    nextPageToken: null,
+    isLoadingMore: false,
   };
 
   function loadJSON(key, fallback) {
@@ -198,7 +200,7 @@
           <div class="shorts-meta">
             <div class="t">${escapeHtml(v.title)}</div>
             <div class="m">${escapeHtml(v.channelTitle || '')} · ${formatViews(v.viewCount)}</div>
-            <div class="i">${i + 1} / ${list.length}</div>
+            <div class="i">${i + 1} / <span class="total-count">${list.length}</span></div>
           </div>
         </div>
       </div>
@@ -214,6 +216,9 @@
         if (entry.isIntersecting) {
           const idx = parseInt(entry.target.dataset.index, 10);
           activateShort(idx);
+          if (idx >= state.shortsList.length - 5) {
+            loadMore();
+          }
         }
       });
     }, {
@@ -342,6 +347,7 @@
     
     state.query = q;
     isSearching = true;
+    state.nextPageToken = null;
     els.grid.innerHTML = `<div class="loading" style="grid-column:1/-1">Searching…</div>`;
     els.resultsMeta.textContent = '';
     
@@ -355,6 +361,7 @@
         return;
       }
       state.rawItems = data.items || [];
+      state.nextPageToken = data.nextPageToken;
       renderGrid();
     } catch (err) {
       els.grid.innerHTML = `<div class="error" style="grid-column:1/-1">Network error. Is the server running?</div>`;
@@ -365,6 +372,71 @@
   els.searchBtn.addEventListener('click', () => runSearch(els.input.value));
   els.input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') runSearch(els.input.value);
+  });
+
+  async function loadMore() {
+    if (state.isLoadingMore || !state.nextPageToken || isSearching) return;
+    state.isLoadingMore = true;
+    try {
+      const res = await fetch(`/api/search?q=${encodeURIComponent(state.query)}&pageToken=${state.nextPageToken}`);
+      const data = await res.json();
+      if (res.ok) {
+        state.nextPageToken = data.nextPageToken;
+        const newItems = (data.items || []).filter(newItem => !state.rawItems.find(existing => existing.id === newItem.id));
+        if (newItems.length > 0) {
+          state.rawItems.push(...newItems);
+          if (document.body.classList.contains('shorts-open') && state.shortsList) {
+             appendShorts(newItems);
+          }
+          renderGrid();
+        }
+      }
+    } catch (err) {
+      console.error('Failed to load more', err);
+    }
+    state.isLoadingMore = false;
+  }
+
+  function appendShorts(newItems) {
+    const overlay = document.getElementById('shorts-overlay');
+    if (!overlay) return;
+    const listEl = overlay.querySelector('.shorts-list');
+    const startIdx = state.shortsList.length;
+    
+    state.shortsList.push(...newItems);
+    
+    const newHtml = newItems.map((v, i) => {
+      const idx = startIdx + i;
+      return `
+        <div class="shorts-item" data-index="${idx}">
+          <div class="shorts-stage" id="stage-${idx}">
+            <div class="thumb" style="background-image: url('${escapeHtml(v.thumbnail)}')"></div>
+            <div class="player-container" id="player-container-${idx}"></div>
+            <div class="shorts-meta">
+              <div class="t">${escapeHtml(v.title)}</div>
+              <div class="m">${escapeHtml(v.channelTitle || '')} · ${formatViews(v.viewCount)}</div>
+              <div class="i">${idx + 1} / <span class="total-count">${state.shortsList.length}</span></div>
+            </div>
+          </div>
+        </div>
+      `;
+    }).join('');
+    
+    listEl.querySelectorAll('.total-count').forEach(el => el.textContent = state.shortsList.length);
+    listEl.insertAdjacentHTML('beforeend', newHtml);
+    
+    const addedItems = Array.from(listEl.querySelectorAll('.shorts-item')).slice(startIdx);
+    addedItems.forEach(el => state.shortsObserver.observe(el));
+    
+    if (state.shortsIndex < state.shortsList.length - 1) {
+      overlay.querySelector('.shorts-nav.down').disabled = false;
+    }
+  }
+
+  window.addEventListener('scroll', () => {
+    if (!document.body.classList.contains('shorts-open') && (window.innerHeight + window.scrollY) >= document.body.offsetHeight - 500) {
+      loadMore();
+    }
   });
 
   renderChips();
