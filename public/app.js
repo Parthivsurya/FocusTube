@@ -403,14 +403,24 @@
 
     const listEl = overlay.querySelector('.shorts-list');
     let scrollTimer = null;
-    const onScrollSettle = () => {
-      if (!state.shortsList || !state.shortsList.length) return;
+    // Pick the index nearest the current scroll position. `predict` adds the
+    // direction of recent motion so we can flip before snap actually settles.
+    const pickIndex = (predict = 0) => {
       const itemHeight = listEl.clientHeight;
-      if (!itemHeight) return;
-      const idx = Math.round(listEl.scrollTop / itemHeight);
+      if (!itemHeight) return -1;
+      let idx = Math.round((listEl.scrollTop + predict) / itemHeight);
+      if (idx < 0) idx = 0;
+      if (idx >= state.shortsList.length) idx = state.shortsList.length - 1;
+      return idx;
+    };
+    const settleTo = (idx) => {
       if (idx < 0 || idx >= state.shortsList.length) return;
       if (idx !== state.shortsIndex) activateShort(idx);
       if (idx >= state.shortsList.length - 5) loadMore();
+    };
+    const onScrollSettle = () => {
+      if (!state.shortsList || !state.shortsList.length) return;
+      settleTo(pickIndex(0));
     };
     listEl.addEventListener('scroll', () => {
       if (scrollTimer) clearTimeout(scrollTimer);
@@ -422,6 +432,59 @@
         onScrollSettle();
       });
     }
+
+    // --- Gesture-bound activation (mobile autoplay path) ---
+    // Mobile browsers require media play() to run inside a user-activation
+    // window. setTimeout-based settling drops out of that window, so we also
+    // fire activateShort synchronously on touchend/pointerup — same code path
+    // as the down-arrow button, which is the only one that currently triggers
+    // autoplay on mobile.
+    let touchStartY = 0;
+    let touchStartScroll = 0;
+    let touchStartTime = 0;
+    listEl.addEventListener('touchstart', (e) => {
+      if (!e.touches || !e.touches[0]) return;
+      touchStartY = e.touches[0].clientY;
+      touchStartScroll = listEl.scrollTop;
+      touchStartTime = performance.now();
+    }, { passive: true });
+    const gestureSettle = (endY) => {
+      if (!state.shortsList || !state.shortsList.length) return;
+      const itemHeight = listEl.clientHeight;
+      if (!itemHeight) return;
+      const dy = touchStartY - endY; // positive = swipe up (scroll down)
+      const dt = Math.max(1, performance.now() - touchStartTime);
+      const velocity = dy / dt; // px per ms
+      // Decide the target index based on where the snap will land.
+      // Threshold of 1/4 of an item or a fling above 0.3 px/ms commits to next/prev.
+      const startIdx = Math.round(touchStartScroll / itemHeight);
+      let targetIdx = pickIndex(0);
+      const swipeFraction = dy / itemHeight;
+      if (Math.abs(swipeFraction) >= 0.25 || Math.abs(velocity) >= 0.3) {
+        targetIdx = startIdx + (dy > 0 ? 1 : -1);
+      }
+      if (targetIdx < 0) targetIdx = 0;
+      if (targetIdx >= state.shortsList.length) targetIdx = state.shortsList.length - 1;
+      // Synchronous activation inside the gesture context — this is the bit
+      // that unlocks autoplay on mobile.
+      if (targetIdx !== state.shortsIndex) {
+        activateShort(targetIdx);
+        // Make sure the scroll lands on it, even if snap was about to revert.
+        const target = listEl.querySelector(`.shorts-item[data-index="${targetIdx}"]`);
+        if (target) target.scrollIntoView({ behavior: 'smooth' });
+      }
+      if (targetIdx >= state.shortsList.length - 5) loadMore();
+    };
+    listEl.addEventListener('touchend', (e) => {
+      const t = (e.changedTouches && e.changedTouches[0]) || null;
+      gestureSettle(t ? t.clientY : touchStartY);
+    }, { passive: true });
+    // Wheel-based scroll on desktop / trackpad: react on the trailing edge.
+    let wheelTimer = null;
+    listEl.addEventListener('wheel', () => {
+      if (wheelTimer) clearTimeout(wheelTimer);
+      wheelTimer = setTimeout(onScrollSettle, 120);
+    }, { passive: true });
   }
 
   let isSearching = false;
