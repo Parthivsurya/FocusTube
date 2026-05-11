@@ -40,7 +40,7 @@ let useRedis = false;
 
 (async () => {
   const client = createClient({
-    url: process.env.REDIS_URL || 'redis://127.0.0.1:6379'
+    url: process.env.KV_URL || process.env.REDIS_URL || 'redis://127.0.0.1:6379'
   });
 
   client.on('error', (err) => {
@@ -163,6 +163,10 @@ app.get('/api/search', async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`FocusTube running at http://localhost:${PORT}`);
-});
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`FocusTube running at http://localhost:${PORT}`);
+  });
+}
+
+module.exports = app;
